@@ -1,7 +1,10 @@
 import re
+import uuid
 from dotenv import load_dotenv
-from agents import symptom_chain, connect_agent, search_agent  # Removed followup_chain import
+from agents import symptom_chain, connect_agent, search_agent
 from speech_utils import capture_audio_input, speak_text
+from document import *
+from db_utils import create_table, get_user, save_user, update_user
 
 load_dotenv()
 
@@ -23,7 +26,7 @@ def speak_response(response):
         text_to_speak = response["content"]
     else:
         text_to_speak = str(response)
-    speak_text(text_to_speak)
+    #speak_text(text_to_speak)
     return text_to_speak
 
 def main():
@@ -32,10 +35,11 @@ def main():
     print("You can describe your symptoms via text, voice, or image.")
     print("Type 'exit', 'by', or 'quit' anytime to exit.\n")
 
+    create_table()
     chat_history = []
 
     while True:
-        mode = input("📝 Input type (text/audio/image): ").strip().lower()
+        mode = input("📝 Input type (text/audio/image/document): ").strip().lower()
         if check_exit(mode):
             print("👋 Exiting...")
             print_chat_history(chat_history)
@@ -57,6 +61,24 @@ def main():
                 print_chat_history(chat_history)
                 break
 
+        elif mode == "document":
+            file_path = input("📄 Enter the patient report PDF path: ").strip()
+            if check_exit(file_path):
+                print("👋 Exiting...")
+                print_chat_history(chat_history)
+                break
+
+            try:
+                user_input = maindocument(file_path)
+                if not user_input:
+                    print("❌ Failed to extract symptoms from the PDF.")
+                    speak_text("Sorry, I could not extract any medical information from the document.")
+                    continue
+            except Exception as e:
+                print(f"❌ Document processing failed: {e}")
+                speak_text("There was a problem processing the document.")
+                continue
+
         elif mode == "image":
             image_path = input("📷 Enter image path: ").strip()
             if check_exit(image_path):
@@ -76,13 +98,13 @@ def main():
                 print(f"\n📋 Image Analysis Result:\n{image_result}")
                 speak_text(image_result)
 
-                match = re.search(r"Highest confidence from '(\w+)' model: \*\*(.*?)\*\* \(([\d\.]+)%\)", image_result)
+                match = re.search(r"Highest confidence from '(\w+)' model: \\(.?)\\* \(([\d\.]+)%\)", image_result)
                 if match:
                     condition = match.group(2)
                     print(f"\n📌 Interpreted symptom from image: {condition}")
                     user_input = condition
                 else:
-                    detected_match = re.search(r"Detected:\s*(.*?)\s*\(", image_result)
+                    detected_match = re.search(r"Detected:\s*(.?)\s\(", image_result)
                     if detected_match:
                         user_input = detected_match.group(1)
                         print(f"\n📌 Interpreted symptom from image: {user_input}")
@@ -97,7 +119,7 @@ def main():
                 continue
 
         else:
-            print("❌ Please choose 'text', 'audio' or 'image'.")
+            print("❌ Please choose 'text', 'audio', 'image', or 'document'.")
             continue
 
         if not user_input:
@@ -111,6 +133,40 @@ def main():
             print_chat_history(chat_history)
             break
 
+        visited_before = input("🧑‍⚕ Have you visited before? (yes/no): ").strip().lower()
+
+        if visited_before in ("yes", "y"):
+            existing_id = input("🔑 Please enter your previous User ID: ").strip()
+            user_record = get_user(existing_id)
+
+            if user_record:
+                print(f"\n📋 Previous Record Found:")
+                print(f"  - Name: {user_record[1]}")
+                print(f"  - Previous Symptoms: {user_record[2]}")
+                print(f"  - Previous Diagnosis: {user_record[4]}")
+                
+                progress = input("🔁 Have your symptoms improved or do you have new ones? (yes/no): ").strip()
+                
+                if not progress or progress.lower() in {"no", "none", "improved", "better"}:
+                    print("😊 Great! You seem to be improving. No further action required.")
+                    speak_text("I'm glad to hear you're feeling better. Take care!")
+                    break
+                else:
+                    user_input = progress
+                    name = user_record[1]
+                    user_id = existing_id
+            else:
+                print("❌ User ID not found. Creating a new record.")
+                visited_before = "no"
+
+        if visited_before == "no":
+            name = input("📝 Please enter your name: ").strip()
+            user_id = str(uuid.uuid4())[:8]
+            print(f"🆔 Your new User ID is: {user_id}")
+            speak_text(f"Your new User ID is {user_id}. Please save it for future use.")
+
+            # search phase
+
         print("\n🔎 Looking up your symptoms for context...")
         try:
             search_query = f"{user_input} near {user_location}"
@@ -119,7 +175,7 @@ def main():
             print(f"❌ Search failed: {e}")
             search_results = "No additional context available."
 
-        # ====== UPDATED: No separate follow-up question step ======
+        # Diagnosis phase
         print("\n🤖 Generating your follow-up questions and diagnosis in one response...")
         try:
             diagnosis_response = symptom_chain.run({
@@ -129,13 +185,26 @@ def main():
             })
             print(f"\n💬 Assistant Response:\n{diagnosis_response}")
             diagnosis = speak_response(diagnosis_response)
+            print("✅ Got diagnosis, proceeding to save...")
         except Exception as e:
             print(f"\n❌ Error generating response: {e}")
             speak_text("There was an issue processing your symptoms. Please try again later.")
             continue
 
+        # Save or update user
+        if visited_before == "no":
+            print("📌 About to save user in DB...")
+            save_user(name, user_input, user_location, diagnosis, user_id)
+        else:
+            print("📌 About to update existing user in DB...")
+            update_user(user_id, user_input, user_location, diagnosis)
+
+        print("✅ DB operation done, now checking critical...")
+
         chat_history.append((user_input, diagnosis))
 
+
+        # Critical condition check
         lower_diag = diagnosis.lower()
         if "immediate medical attention" in lower_diag or "life-threatening" in lower_diag:
             print("\n⚠ Serious condition detected! Generating your meet link...")
@@ -159,3 +228,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

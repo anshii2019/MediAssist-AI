@@ -1,0 +1,329 @@
+import re
+import uuid
+from dotenv import load_dotenv
+from agents import symptom_chain, connect_agent, search_agent
+from speech_utils import capture_audio_input, speak_text
+from document import *
+from db_utils import create_table, get_user, save_user, update_user
+
+load_dotenv()
+
+EXIT_COMMANDS = {"by", "exit", "quit", "bye"}
+
+def check_exit(user_input):
+    return user_input.strip().lower() in EXIT_COMMANDS
+
+def print_chat_history(history):
+    print("\n🗨 Chat History:")
+    for i, (inp, resp) in enumerate(history, 1):
+        print(f"{i}. You: {inp}")
+       # print(f"   Assistant: {resp}\n")
+
+def speak_response(response):
+    if hasattr(response, "content"):
+        text_to_speak = response.content
+    elif isinstance(response, dict) and "content" in response:
+        text_to_speak = response["content"]
+    else:
+        text_to_speak = str(response)
+    #speak_text(text_to_speak)
+    return text_to_speak
+
+def main():
+    print("\n🤖 Welcome to the AI Health Assistant")
+    print("=======================================")
+    print("You can describe your symptoms via text, voice, or image.")
+    print("Type 'exit', 'by', or 'quit' anytime to exit.\n")
+
+    create_table()
+    chat_history = []
+
+    while True:
+        
+
+        visited_before = input("🧑‍⚕ Have you visited before? (yes/no): ").strip().lower()
+        if check_exit(visited_before):
+            print("👋 Exiting...")
+            print_chat_history(chat_history)
+            break
+
+        if visited_before in ("yes", "y"):
+            existing_id = input("🔑 Please enter your previous User ID: ").strip()
+            user_record = get_user(existing_id)
+
+            if user_record:
+                print(f"\n📋 Previous Record Found:")
+                print(f"  - Name: {user_record[1]}")
+                print(f"  - Previous Symptoms: {user_record[2]}")
+                print(f"  - Previous Diagnosis: {user_record[4]}")
+                
+
+                progress = input("🔁 Have your symptoms improved? (yes/no): ").strip().lower()
+                if progress in {"yes", "y"}:
+                    print("😊 Great! You seem to be improving. No further action required.")
+                    speak_text("I'm glad to hear you're feeling better. Take care!")
+                    break
+                else:
+                    mode = input("📝 Input type (text/audio/image/document): ").strip().lower()
+                    if check_exit(mode):
+                        print("👋 Exiting...")
+                        print_chat_history(chat_history)
+                        break
+
+                    print("You can describe your symptoms in detail; otherwise, you may not get better results.")
+
+
+                    if mode == "audio":
+                       user_input = capture_audio_input() or ""
+                       if check_exit(user_input):
+                        print("👋 Exiting...")
+                        print_chat_history(chat_history)
+                        break
+              
+                    elif mode == "text":
+                       user_input = input("🧠 Describe your symptoms: ").strip()
+                       if check_exit(user_input):
+                        print("👋 Exiting...")
+                        print_chat_history(chat_history)
+                        break
+              
+                    elif mode == "document":
+                       file_path = input("📄 Enter the patient report PDF path: ").strip()
+                       if check_exit(file_path):
+                          print("👋 Exiting...")
+                          print_chat_history(chat_history)
+                          break
+                       
+                       try:
+                          user_input = maindocument(file_path)
+                          if not user_input:
+                            print("❌ Failed to extract symptoms from the PDF.")
+                            speak_text("Sorry, I could not extract any medical information from the document.")
+                            continue
+                       except Exception as e:
+                          print(f"❌ Document processing failed: {e}")
+                          speak_text("There was a problem processing the document.")
+                          continue
+                       
+                    elif mode == "image":
+                        image_path = input("📷 Enter image path: ").strip()
+                        if check_exit(image_path):
+                          print("👋 Exiting...")
+                          print_chat_history(chat_history)
+                          break
+
+                        if not image_path:
+                          print("❌ No image path provided.")
+                          speak_text("I need an image path to proceed.")
+                          continue
+
+                        print("\n🔍 Analyzing image...")
+                        try:
+                           from tools import analyze_medical_image
+                           image_result = analyze_medical_image(image_path)
+                           print(f"\n📋 Image Analysis Result:\n{image_result}")
+                           speak_text(image_result)
+
+                           match = re.search(r"Highest confidence from '(\w+)' model: \\(.?)\\* \(([\d\.]+)%\)", image_result)
+                           if match:
+                                condition = match.group(2)
+                                print(f"\n📌 Interpreted symptom from image: {condition}")
+                                user_input = condition
+                           else:
+                                detected_match = re.search(r"Detected:\s*(.?)\s\(", image_result)
+                                if detected_match:
+                                    user_input = detected_match.group(1)
+                                    print(f"\n📌 Interpreted symptom from image: {user_input}")
+                                else:
+                                    print("❌ Could not interpret condition from image.")
+                                    speak_text("I could not understand the image result.")
+                                    continue
+
+                        except Exception as e:
+                            print(f"❌ Image analysis failed: {e}")
+                            speak_text("There was a problem analyzing your image.")
+                            continue
+                    else:
+                        print("❌ Please choose 'text', 'audio', 'image', or 'document'.")
+                        continue
+
+                    if not user_input:
+                        print("❌ Could not capture any input.")
+                        speak_text("I couldn't hear anything. Please try again.")
+                        continue
+
+                    user_location = input("\n📍 Enter your location (e.g., Noida, Mumbai): ").strip()
+                           
+
+                    #user_input = input("🧠 Describe your symptoms: ").strip()
+                    #user_location = input("📍 Enter your location (e.g., Noida, Mumbai): ").strip()
+                    name = user_record[1]
+                    user_id = existing_id
+            else:
+                print("❌ User ID not found. Let's register you as a new user.")
+                visited_before = "no"
+
+        if visited_before == "no":
+            name = input("📝 Please enter your name: ").strip()
+            user_id = str(uuid.uuid4())[:8]
+            print(f"🆔 Your new User ID is: {user_id}")
+
+            mode = input("📝 Input type (text/audio/image/document): ").strip().lower()
+            if check_exit(mode):
+                print("👋 Exiting...")
+                print_chat_history(chat_history)
+                break
+
+            print("You can describe your symptoms in detail; otherwise, you may not get better results.")
+
+             
+            if mode == "audio":
+              user_input = capture_audio_input() or ""
+              if check_exit(user_input):
+                print("👋 Exiting...")
+                print_chat_history(chat_history)
+                break
+              
+            elif mode == "text":
+              user_input = input("🧠 Describe your symptoms: ").strip()
+              if check_exit(user_input):
+                print("👋 Exiting...")
+                print_chat_history(chat_history)
+                break
+              
+            elif mode == "document":
+                file_path = input("📄 Enter the patient report PDF path: ").strip()
+                if check_exit(file_path):
+                  print("👋 Exiting...")
+                  print_chat_history(chat_history)
+                  break
+             
+                try:
+                    user_input = maindocument(file_path)
+                    if not user_input:
+                      print("❌ Failed to extract symptoms from the PDF.")
+                      speak_text("Sorry, I could not extract any medical information from the document.")
+                      continue
+                except Exception as e:
+                    print(f"❌ Document processing failed: {e}")
+                    speak_text("There was a problem processing the document.")
+                    continue
+
+            elif mode == "image":
+                image_path = input("📷 Enter image path: ").strip()
+                if check_exit(image_path):
+                    print("👋 Exiting...")
+                    print_chat_history(chat_history)
+                    break
+                 
+                if not image_path:
+                   print("❌ No image path provided.")
+                   speak_text("I need an image path to proceed.")
+                   continue
+                 
+                print("\n🔍 Analyzing image...")
+                try:
+                    from tools import analyze_medical_image
+                    image_result = analyze_medical_image(image_path)
+                    print(f"\n📋 Image Analysis Result:\n{image_result}")
+                    speak_text(image_result)
+
+                    match = re.search(r"Highest confidence from '(\w+)' model: \((.*?)\) \(([\d\.]+)%\)", image_result)
+                    if match:
+                       condition = match.group(2)
+                       print(f"\n📌 Interpreted symptom from image: {condition}")
+                       user_input = condition
+                    else:
+                        detected_match = re.search(r"Detected:\s*(.?)\s\(", image_result)
+                        if detected_match:
+                            user_input = detected_match.group(1)
+                            print(f"\n📌 Interpreted symptom from image: {user_input}")
+                        else:
+                           print("❌ Could not interpret condition from image.")
+                           speak_text("I could not understand the image result.")
+                           continue
+
+                except Exception as e:
+                   print(f"❌ Image analysis failed: {e}")
+                   speak_text("There was a problem analyzing your image.")
+                   continue
+
+            else:
+               print("❌ Please choose 'text', 'audio', 'image', or 'document'.")
+               continue
+
+            if not user_input:
+               print("❌ Could not capture any input.")
+               speak_text("I couldn't hear anything. Please try again.")
+               continue
+
+            user_location = input("\n📍 Enter your location (e.g., Noida, Mumbai): ").strip()
+            if check_exit(user_location):
+               print("👋 Exiting...")
+               print_chat_history(chat_history)
+               break
+
+
+            
+            #user_location = input("📍 Enter your location (e.g., Noida, Mumbai): ").strip()
+
+        # Search phase
+        print("\n🔎 Looking up your symptoms for context...")
+        try:
+            search_query = f"{user_input} near {user_location}"
+            search_results = search_agent.run(search_query)
+        except Exception as e:
+            print(f"❌ Search failed: {e}")
+            search_results = "No additional context available."
+
+        # Diagnosis phase
+        print("\n🤖 Generating your follow-up questions and diagnosis in one response...")
+        try:
+            diagnosis_response = symptom_chain.run({
+                "input": user_input,
+                "search_results": search_results,
+                "user_location": user_location
+            })
+            print(f"\n💬 Assistant Response:\n{diagnosis_response}")
+            diagnosis = speak_response(diagnosis_response)
+            print("✅ Got diagnosis, proceeding to save...")
+        except Exception as e:
+            print(f"\n❌ Error generating response: {e}")
+            speak_text("There was an issue processing your symptoms. Please try again later.")
+            continue
+
+        # Save or update user
+        if visited_before == "no":
+            save_user(name, user_input, user_location, diagnosis, user_id)
+        else:
+            update_user(user_id, user_input, user_location, diagnosis)
+
+        print("✅ DB operation done, now checking critical...")
+
+        chat_history.append((user_input, diagnosis))
+
+        # Critical condition check
+        lower_diag = diagnosis.lower()
+        if "immediate medical attention" in lower_diag or "life-threatening" in lower_diag:
+            print("\n⚠ Serious condition detected! Generating your meet link...")
+            try:
+                connection_output = connect_agent.run("Check availability and generate meet link")
+                urls = re.findall(r'https?://\S+', connection_output)
+                meet_link = urls[0] if urls else None
+            except Exception as e:
+                print(f"\n❌ Error generating meet link: {e}")
+                meet_link = None
+
+            if not meet_link:
+                print("❌ Failed to generate meet link.")
+                speak_text("I couldn't generate the meet link. Please consult a professional.")
+            else:
+                print(f"\n🔗 Consultation link:\n{meet_link}")
+                speak_text(f"Your consultation link is {meet_link}.")
+        else:
+            print("\n👍 Symptoms look non-critical. Please rest and monitor.")
+            speak_text("Your symptoms appear mild. Rest and monitor.")
+        #break
+
+if __name__ == "__main__":
+    main()
